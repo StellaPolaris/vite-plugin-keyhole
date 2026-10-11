@@ -1,7 +1,7 @@
 # vite-plugin-keyhole
 
 Encrypt a whole Vite build so it can live on any public static host (GitHub Pages, for example), yet
-opens only for people whose link contains the key.
+opens only for people with the link, or the password if you set one.
 
 ```ts
 // vite.config.ts
@@ -16,100 +16,101 @@ export default defineConfig({
 ```
 
 ```sh
-npx keyhole keygen                                   # prints a new key
+npx keyhole keygen                                    # prints a new key
 echo "KEYHOLE_KEY=<that key>" >> .env.production.local
-npx vite build                                       # dist/ now has 3 files
-npx keyhole link https://me.github.io/my-site/about  # prints …/about#key=<key>
+echo "KEYHOLE_PASSWORD=<a long passphrase>" >> .env.production.local   # optional
+npx vite build
 ```
 
-`vite dev` is unchanged and needs no key. No app code is needed.
+Share `https://me.github.io/my-site/#key=<that key>`, or the password. `vite dev` is unchanged and
+needs no key. No app code is needed.
 
 ## What gets published
 
-| File                          | Contents                                                      |
-| ----------------------------- | ------------------------------------------------------------- |
-| `index.html`                  | A neutral landing page ("Coming soon") with a small inline loader |
-| `404.html`                    | The same page, so deep links like `/my-site/about` work       |
-| `assets/keyhole-<hash>.bin`   | Your app's HTML, CSS, JS, fonts and images, gzipped and encrypted |
+`index.html` holds a neutral landing page ("Coming soon"), a small loader and your whole app (HTML, CSS,
+JS, fonts and images), gzipped and encrypted. `404.html` is the same page, so deep links like
+`/my-site/about` work. Nothing else is published unless you list it in `publish`.
 
-When someone opens a link with `#key=…`, the loader removes the key from the address bar, downloads
-and decrypts the `.bin`, swaps in your app's document and runs it. The key is remembered in that browser,
-so later visits open directly. `#logout` makes the browser forget it.
+When someone opens a link with `#key=…`, the loader removes the key from the address bar, decrypts the
+app, swaps in its document and runs it. With a password set, the landing page also shows a password
+field. The key is remembered in that browser, so later visits open directly. `#logout` makes the
+browser forget it.
 
 ## Options
 
-| Option        | Default        | What it does                                                                |
-| ------------- | -------------- | --------------------------------------------------------------------------- |
-| `key`         | `KEYHOLE_KEY`  | The 43-character key. Read from the environment or `.env*` files by default. The build fails if it's missing or malformed. |
-| `landing`     | built-in page  | Path to your own landing HTML. It needs a `</body>`. An element with `id="keyhole-retry"` is shown when a download fails, and one with `id="keyhole-unsupported"` when a visitor with a key opens it without HTTPS or in an old browser. |
-| `remember`    | `'local'`      | Where the key is kept after unlocking: `'local'`, `'session'` or `'none'`. Entries are namespaced by `base`. |
-| `spaFallback` | `true`         | Also write `404.html`.                                                      |
+| Option        | Default            | What it does |
+| ------------- | ------------------ | ------------ |
+| `key`         | `KEYHOLE_KEY`      | The 43-character key that links carry. Read from the environment or `.env*` files by default. |
+| `password`    | `KEYHOLE_PASSWORD` | Also let visitors type a password. Leave it unset for links only. Changing it doesn't break links. |
+| `publish`     | `[]`               | Files that may be published unencrypted, relative to the output folder, e.g. `['favicon.svg', 'CNAME', '_headers']`. A trailing `/` allows a folder. |
+| `landing`     | built-in page      | Path to your own landing HTML (see below). |
+| `remember`    | `true`             | Keep the key in `localStorage` after unlocking. Entries are namespaced by `base`. |
+| `spaFallback` | `true`             | Also write `404.html`. |
 
-The `KEYHOLE_` prefix is not in Vite's `envPrefix`, so the key never ends up in client code.
+The `KEYHOLE_` prefix is not in Vite's `envPrefix`, so the key and password never end up in client code.
+Without a key, the build fails and suggests a fresh one.
+
+### Your own landing page
+
+Any HTML file with a `</body>`. The loader sets `<html data-keyhole="…">` so the page can style itself:
+`loading`, `locked` (no key), `password` and `wrong-password` (a password is set), or `unsupported` (no
+HTTPS or an old browser; shown only to visitors with a key or a password field). For a password field,
+add a `<form id="keyhole-password">` with an `<input name="password">`. The built-in
+[`landing.html`](src/landing.html) is a starting point.
 
 ## What it protects, and what it doesn't
 
-It protects content from anyone without the link, including search engines and anyone reading the
-public files.
+It protects content from anyone without the link or password, including search engines and anyone
+reading the public files.
 
 It does **not** protect against:
 
-- **The host or build machine.** The host can't decrypt the stored file, but it serves the loader. A
-  malicious or compromised host could replace the loader and capture the key on someone's next visit.
-  Both must be trusted to run the code they were given.
-- **Anyone with the link.** This is a shared secret, not access control. Anyone holding the link can
-  read everything and keep a copy.
-- **Old downloads after a key change.** A new key protects new builds. An encrypted file someone
-  downloaded earlier still opens with the old key.
+- **Weak passwords.** Anyone can download the page and guess passwords offline. Each guess costs
+  600,000 PBKDF2 rounds, which slows guessing but doesn't stop it. Use a long passphrase, or links only.
+- **The host or build machine.** A malicious or compromised host could replace the loader and capture
+  the key or password on someone's next visit.
+- **Anyone with the link or password.** This is a shared secret, not access control. Anyone holding it
+  can read everything and keep a copy.
+- **Old copies after a key change.** A new key protects new builds. A page someone saved earlier
+  still opens with the old key or password.
 - **The browser.** The key stays in history entries created before it was removed, in chats where the
   link was pasted, and in storage on devices where it was used. App scripts run in the same page as
   the loader and could read it.
-- **Metadata.** The size of the encrypted file and the fact that something encrypted is served.
-- **Secrets in your app**, such as API keys. Anyone with the link can read them.
+- **Metadata.** The size of the encrypted app and the fact that something encrypted is served.
+- **Secrets in your app**, such as API keys. Anyone who can open it can read them.
 
 ## Supported apps
 
-One HTML entry, rendered in the browser (an SPA), fully bundled, with no web workers or service
-workers. The plugin forces one JS chunk, one inlined stylesheet and inlined assets, and the build fails
-with a list of files if the output looks different. It also fails if anything else ends up in the
-output folder, such as stale files or source maps. Files in `public/` fail the build before anything is
-written; set `build.copyPublicDir: false` to keep them out. Set the destination with `build.outDir`:
-overriding the output `dir` or `file` is refused.
+One HTML entry, rendered in the browser (an SPA), fully bundled. The plugin forces one JS chunk, one
+inlined stylesheet and inlined assets, and warns when it overrides your `sourcemap`, `manifest` or chunk
+settings. The build fails with a list of files if anything else would be published unencrypted, such as
+`public/` files you didn't list in `publish`, stale files, or extra chunks.
 
-Your app starts after the page has finished loading, so a few things behave differently:
-
-- Inline `<script>` tags in your `index.html` don't run. Put that code in your entry module.
-- `DOMContentLoaded` and `load` have already fired. Start your app directly from the entry module, as
-  React, Vue and Svelte templates do, rather than waiting for those events.
-- Hash-based routers (`#/about`) can't share a URL with `#key=…`. Use path-based routing, which also
-  needs an absolute `base` (like `/my-site/`) so deep links can find the payload.
-
-## When something goes wrong
-
-The visitor sees the neutral landing page, never an error message. The only exception is a visitor
-who has a key but opened it without HTTPS or in a browser that can't decrypt: they see a short hint,
-and the key stays in the address bar. A saved key is forgotten only when
-it doesn't match the file (after a key change), never because of a failed download.
-
-| What happened                                        | What the loader does                                     |
-| ---------------------------------------------------- | -------------------------------------------------------- |
-| No key, or a key for a different build               | Landing page                                             |
-| The `.bin` is missing (404, or an HTML page from a host that rewrites every path) or in a newer format | The page is older than the current build: it reloads once to get the current HTML, then offers "Try again" |
-| Offline, server error, or a damaged download          | "Try again" downloads again                              |
-| The app throws while starting                        | Landing page back, "Try again" reloads; the error is in the console |
+- **Workers:** import them with `?worker&inline`. Service workers aren't supported.
+- **Not needed:** `@vitejs/plugin-legacy` (the loader needs a modern browser) and compression plugins
+  (the app is already gzipped).
+- **Frameworks that render their own HTML** (SvelteKit, Astro, SSR) aren't supported.
+- **SVG sprites in `public/`** (`<use href="/icons.svg#x">`) need `publish: ['icons.svg']`; browsers
+  don't allow `<use>` with inlined `data:` URLs.
+- **Your app starts after the page has loaded**, so `DOMContentLoaded` and `load` have already fired.
+  Start your app from the entry module, as React, Vue and Svelte templates do. Other `<script>` tags in
+  your `index.html` run in order before it.
+- **Hash-based routers** (`#/about`) can't share a URL with `#key=…`, but work once the key is saved.
+  Path-based routing needs an absolute `base` (like `/my-site/`).
 
 ## Content Security Policy
 
-The plugin emits no CSP. If your host lets you set headers, this works with the loader:
+The plugin emits no CSP. If your host lets you set headers (e.g. `_headers`, added to `publish`), this
+works with the loader:
 
 ```
 default-src 'self'; script-src 'self' 'unsafe-inline' blob:; style-src 'self' 'unsafe-inline';
-img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; base-uri 'none'; object-src 'none'
+img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' data:; base-uri 'none'; object-src 'none'
 ```
 
-## Format and code
+Apps that use WebAssembly also need `'wasm-unsafe-eval'` in `script-src`.
 
-- `FORMAT.md`: the file format: AES-256-GCM, a versioned header used as authenticated data, and a key ID.
-- `src/core.ts`: the whole crypto core, WebCrypto only, the same code in Node and browsers.
-- `vite-plugin-keyhole/core` exports it: `generateKey`, `parseKey`, `encrypt`, `decrypt`,
-  `sealPayload` and `openPayload`.
+## Format
+
+[`FORMAT.md`](FORMAT.md) describes the encryption: AES-256-GCM with a versioned header, and PBKDF2 for
+the optional password. [`src/core.ts`](src/core.ts) implements it with WebCrypto only.

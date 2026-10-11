@@ -1,41 +1,33 @@
-// The whole cryptographic core: key handling, the v1 envelope format, and gzip helpers.
-// Uses only WebCrypto and CompressionStream, so the same code runs in Node 24 and in browsers.
+// The whole cryptographic core: key handling, the v1 envelope format, password wrapping and gzip.
+// Uses only WebCrypto and CompressionStream, so the same code runs in Node and in browsers.
 // The format is specified in FORMAT.md.
 
-export const MAGIC = 'KYHL';
-export const VERSION = 1;
-export const KEY_BYTES = 32;
-export const KEY_ID_BYTES = 4;
-export const IV_BYTES = 12;
-export const TAG_BYTES = 16;
-/** magic(4) · version(1) · keyId(4) · iv(12). Used as the AES-GCM additional data. */
-export const HEADER_BYTES: number = 4 + 1 + KEY_ID_BYTES + IV_BYTES;
-/** Largest envelope the plugin writes and the loader downloads. */
-export const MAX_ENVELOPE_BYTES: number = 64 * 1024 * 1024;
-/** Largest decompressed payload the loader accepts. */
-export const MAX_PLAINTEXT_BYTES: number = 256 * 1024 * 1024;
+const MAGIC = 'KYHL';
+const VERSION = 1;
+const KEY_BYTES = 32;
+const IV_BYTES = 12;
+const TAG_BYTES = 16;
+const SALT_BYTES = 16;
+/** PBKDF2-SHA256 iterations for passwords (OWASP 2023 recommendation). */
+const PBKDF2_ITERATIONS = 600_000;
+// Header layout: magic(4) · version(1) · iv(12).
+const VERSION_OFFSET = 4;
+const IV_OFFSET = VERSION_OFFSET + 1;
+/** The header length. The header is the AES-GCM additional data. */
+export const HEADER_BYTES: number = IV_OFFSET + IV_BYTES;
 
 const KEY_PATTERN = /^[A-Za-z0-9_-]{43}$/;
-const KEY_ID_LABEL = 'keyhole/key-id/v1';
 
 export type KeyholeErrorKind =
-  | 'corrupt' // not a keyhole envelope, or truncated
-  | 'unsupported-version' // a keyhole envelope from a newer (or older) format version
-  | 'wrong-key' // the key ID in the header doesn't match this key
-  | 'auth-failed' // AES-GCM authentication failed: tampered file or wrong key
-  | 'too-large';
+  | 'corrupt' // not a keyhole envelope, truncated, or not a payload
+  | 'unsupported-version' // a keyhole envelope from another format version
+  | 'auth-failed'; // AES-GCM authentication failed: wrong key or tampered file
 
 export class KeyholeError extends Error {
   constructor(readonly kind: KeyholeErrorKind) {
     super(`keyhole: ${kind}`);
     this.name = 'KeyholeError';
   }
-}
-
-export interface Header {
-  version: number;
-  keyId: Uint8Array<ArrayBuffer>;
-  iv: Uint8Array<ArrayBuffer>;
 }
 
 // ---- base64url and keys ----
@@ -49,7 +41,9 @@ export function base64UrlEncode(bytes: Uint8Array): string {
 export function base64UrlDecode(text: string): Uint8Array<ArrayBuffer> {
   if (!/^[A-Za-z0-9_-]*$/.test(text)) throw new Error('invalid base64url');
   const bin = atob(text.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (text.length % 4)) % 4));
-  return Uint8Array.from(bin, (c) => c.charCodeAt(0));
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
 }
 
 /** A fresh random 256-bit key as 43 base64url characters. */
@@ -66,37 +60,26 @@ export function parseKey(text: string): Uint8Array<ArrayBuffer> | null {
   return bytes;
 }
 
-/** First 4 bytes of SHA-256("keyhole/key-id/v1" ‖ key). Identifies a key without revealing it. */
-export async function keyId(key: Uint8Array): Promise<Uint8Array<ArrayBuffer>> {
-  const label = new TextEncoder().encode(KEY_ID_LABEL);
-  const input = new Uint8Array(label.length + key.length);
-  input.set(label);
-  input.set(key, label.length);
-  return new Uint8Array(await crypto.subtle.digest('SHA-256', input)).slice(0, KEY_ID_BYTES);
-}
-
-// ---- envelope ----
-
-/** Parse and check the 21-byte header. Throws 'corrupt' or 'unsupported-version'. */
-export function readHeader(envelope: Uint8Array): Header {
-  const magic = String.fromCharCode(...envelope.subarray(0, 4));
-  if (magic !== MAGIC || envelope.length < HEADER_BYTES + TAG_BYTES) throw new KeyholeError('corrupt');
-  const version = envelope[4];
-  if (version !== VERSION) throw new KeyholeError('unsupported-version');
-  return {
-    version,
-    keyId: envelope.slice(5, 5 + KEY_ID_BYTES),
-    iv: envelope.slice(5 + KEY_ID_BYTES, HEADER_BYTES),
-  };
-}
-
-export function equalBytes(a: Uint8Array, b: Uint8Array): boolean {
-  return a.length === b.length && a.every((x, i) => x === b[i]);
+/** The same bytes as an ArrayBuffer-backed view, which Web APIs require. Copies only SharedArrayBuffer-backed input. */
+function bufferView(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
+  return bytes.buffer instanceof ArrayBuffer
+    ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+    : new Uint8Array(bytes);
 }
 
 function importKey(key: Uint8Array, usage: 'encrypt' | 'decrypt'): Promise<CryptoKey> {
   if (key.length !== KEY_BYTES) throw new Error('keyhole: key must be 32 bytes');
-  return crypto.subtle.importKey('raw', new Uint8Array(key), { name: 'AES-GCM' }, false, [usage]);
+  return crypto.subtle.importKey('raw', bufferView(key), { name: 'AES-GCM' }, false, [usage]);
+}
+
+// ---- envelope ----
+
+/** Check the 17-byte header and return its IV. Throws 'corrupt' or 'unsupported-version'. */
+export function readHeader(envelope: Uint8Array): Uint8Array<ArrayBuffer> {
+  const magic = String.fromCharCode(...envelope.subarray(0, VERSION_OFFSET));
+  if (magic !== MAGIC || envelope.length < HEADER_BYTES + TAG_BYTES) throw new KeyholeError('corrupt');
+  if (envelope[VERSION_OFFSET] !== VERSION) throw new KeyholeError('unsupported-version');
+  return envelope.slice(IV_OFFSET, HEADER_BYTES);
 }
 
 /**
@@ -111,13 +94,12 @@ export async function encrypt(
   if (iv.length !== IV_BYTES) throw new Error('keyhole: iv must be 12 bytes');
   const header = new Uint8Array(HEADER_BYTES);
   header.set(new TextEncoder().encode(MAGIC));
-  header[4] = VERSION;
-  header.set(await keyId(key), 5);
-  header.set(iv, 5 + KEY_ID_BYTES);
+  header[VERSION_OFFSET] = VERSION;
+  header.set(iv, IV_OFFSET);
   const sealed = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv: new Uint8Array(iv), additionalData: header, tagLength: TAG_BYTES * 8 },
+    { name: 'AES-GCM', iv: bufferView(iv), additionalData: header, tagLength: TAG_BYTES * 8 },
     await importKey(key, 'encrypt'),
-    new Uint8Array(plaintext),
+    bufferView(plaintext),
   );
   const out = new Uint8Array(HEADER_BYTES + sealed.byteLength);
   out.set(header);
@@ -125,22 +107,13 @@ export async function encrypt(
   return out;
 }
 
-/**
- * Check the header and key ID, then authenticate and decrypt.
- * Throws 'corrupt', 'unsupported-version', 'wrong-key' or 'auth-failed'.
- */
+/** Check the header, then authenticate and decrypt. Throws 'corrupt', 'unsupported-version' or 'auth-failed'. */
 export async function decrypt(envelope: Uint8Array, key: Uint8Array): Promise<Uint8Array<ArrayBuffer>> {
   const bytes = bufferView(envelope);
-  const header = readHeader(bytes);
-  if (!equalBytes(header.keyId, await keyId(key))) throw new KeyholeError('wrong-key');
+  const iv = readHeader(bytes);
   try {
     const plain = await crypto.subtle.decrypt(
-      {
-        name: 'AES-GCM',
-        iv: header.iv,
-        additionalData: bytes.subarray(0, HEADER_BYTES),
-        tagLength: TAG_BYTES * 8,
-      },
+      { name: 'AES-GCM', iv, additionalData: bytes.subarray(0, HEADER_BYTES), tagLength: TAG_BYTES * 8 },
       await importKey(key, 'decrypt'),
       bytes.subarray(HEADER_BYTES),
     );
@@ -150,49 +123,74 @@ export async function decrypt(envelope: Uint8Array, key: Uint8Array): Promise<Ui
   }
 }
 
-/** The same bytes as an ArrayBuffer-backed view, which Web APIs require. Copies only SharedArrayBuffer-backed input. */
-function bufferView(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
-  return bytes.buffer instanceof ArrayBuffer
-    ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-    : new Uint8Array(bytes);
+// ---- password wrapping: the page keeps the key encrypted under a password-derived key ----
+
+export interface WrappedKey {
+  /** base64url: 16-byte PBKDF2 salt, 12-byte AES-GCM IV, and the encrypted 32-byte key plus tag. */
+  salt: string;
+  iv: string;
+  key: string;
+}
+
+async function passwordKey(password: string, salt: Uint8Array, usage: 'encrypt' | 'decrypt'): Promise<CryptoKey> {
+  const material = await crypto.subtle.importKey('raw', new TextEncoder().encode(password.normalize('NFC')), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey(
+    { name: 'PBKDF2', hash: 'SHA-256', salt: bufferView(salt), iterations: PBKDF2_ITERATIONS },
+    material,
+    { name: 'AES-GCM', length: KEY_BYTES * 8 },
+    false,
+    [usage],
+  );
+}
+
+/** Encrypt `key` under `password`, with a fresh salt and IV. */
+export async function wrapKey(key: Uint8Array, password: string): Promise<WrappedKey> {
+  const salt = crypto.getRandomValues(new Uint8Array(SALT_BYTES));
+  const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
+  const sealed = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await passwordKey(password, salt, 'encrypt'), bufferView(key));
+  return { salt: base64UrlEncode(salt), iv: base64UrlEncode(iv), key: base64UrlEncode(new Uint8Array(sealed)) };
+}
+
+/** The key wrapped under `password`, or null if the password is wrong. */
+export async function unwrapKey(wrapped: WrappedKey, password: string): Promise<Uint8Array<ArrayBuffer> | null> {
+  try {
+    const key = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: base64UrlDecode(wrapped.iv) },
+      await passwordKey(password, base64UrlDecode(wrapped.salt), 'decrypt'),
+      base64UrlDecode(wrapped.key),
+    );
+    return new Uint8Array(key);
+  } catch {
+    return null;
+  }
 }
 
 // ---- compression ----
 
-/** Read a stream fully, cancelling and throwing 'too-large' once it passes `cap` bytes. */
-export async function readBounded(stream: ReadableStream<Uint8Array>, cap: number): Promise<Uint8Array<ArrayBuffer>> {
-  const reader = stream.getReader();
-  const parts: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > cap) {
-      await reader.cancel().catch(() => {});
-      throw new KeyholeError('too-large');
-    }
-    parts.push(value);
-  }
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const part of parts) {
-    out.set(part, offset);
-    offset += part.byteLength;
-  }
-  return out;
+/** A one-chunk stream over `bytes`, without the full copy a Blob would make. */
+function streamOf(bytes: Uint8Array): ReadableStream<Uint8Array<ArrayBuffer>> {
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue(bufferView(bytes));
+      controller.close();
+    },
+  });
+}
+
+async function transform(bytes: Uint8Array, stream: CompressionStream | DecompressionStream): Promise<Uint8Array<ArrayBuffer>> {
+  return new Uint8Array(await new Response(streamOf(bytes).pipeThrough(stream)).arrayBuffer());
 }
 
 export function gzip(bytes: Uint8Array): Promise<Uint8Array<ArrayBuffer>> {
-  return readBounded(new Blob([bufferView(bytes)]).stream().pipeThrough(new CompressionStream('gzip')), Infinity);
+  return transform(bytes, new CompressionStream('gzip'));
 }
 
-/** Decompress gzip with an output cap. Throws 'corrupt' on invalid gzip, 'too-large' over the cap. */
-export async function gunzip(bytes: Uint8Array, cap: number = MAX_PLAINTEXT_BYTES): Promise<Uint8Array<ArrayBuffer>> {
+/** Decompress gzip. Throws 'corrupt' on invalid gzip. */
+export async function gunzip(bytes: Uint8Array): Promise<Uint8Array<ArrayBuffer>> {
   try {
-    return await readBounded(new Blob([bufferView(bytes)]).stream().pipeThrough(new DecompressionStream('gzip')), cap);
-  } catch (error) {
-    throw error instanceof KeyholeError ? error : new KeyholeError('corrupt');
+    return await transform(bytes, new DecompressionStream('gzip'));
+  } catch {
+    throw new KeyholeError('corrupt');
   }
 }
 
@@ -205,10 +203,9 @@ export interface Payload {
   js: string;
 }
 
-/** gzip(JSON {html, js}), then encrypt. Throws 'too-large' if openPayload couldn't unpack the result. */
+/** gzip(JSON {html, js}), then encrypt. */
 export async function sealPayload(payload: Payload, key: Uint8Array): Promise<Uint8Array<ArrayBuffer>> {
   const json = new TextEncoder().encode(JSON.stringify({ html: payload.html, js: payload.js }));
-  if (json.byteLength > MAX_PLAINTEXT_BYTES) throw new KeyholeError('too-large');
   return encrypt(await gzip(json), key);
 }
 

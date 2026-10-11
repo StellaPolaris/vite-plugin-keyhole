@@ -1,17 +1,13 @@
 {
   "name": "vite-plugin-keyhole",
   "version": "0.0.0",
-  "description": "Encrypt a whole Vite build so it opens only with a key in the link",
+  "description": "Encrypt a whole Vite build so it opens only with a link key or a password",
   "license": "MIT",
   "type": "module",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    },
-    "./core": {
-      "types": "./dist/core.d.ts",
-      "default": "./dist/core.js"
     }
   },
   "bin": {
@@ -21,7 +17,7 @@
     "dist"
   ],
   "engines": {
-    "node": ">=24"
+    "node": ">=22.12"
   },
   "scripts": {
     "build": "tsdown",

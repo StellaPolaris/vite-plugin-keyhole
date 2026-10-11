@@ -1,22 +1,19 @@
 // Generates test/vectors.json with node:crypto (createCipheriv), independently of src/core.ts,
 // so the core's WebCrypto output is checked against a second implementation.
-import { createCipheriv, createHash } from 'node:crypto';
+import { createCipheriv } from 'node:crypto';
 
-const label = Buffer.from('keyhole/key-id/v1');
 const b64url = (buf) => buf.toString('base64url');
 
 function vector(name, keyHex, ivHex, plaintext) {
   const key = Buffer.from(keyHex, 'hex');
   const iv = Buffer.from(ivHex, 'hex');
-  const keyId = createHash('sha256').update(Buffer.concat([label, key])).digest().subarray(0, 4);
-  const header = Buffer.concat([Buffer.from('KYHL'), Buffer.from([1]), keyId, iv]);
+  const header = Buffer.concat([Buffer.from('KYHL'), Buffer.from([1]), iv]);
   const cipher = createCipheriv('aes-256-gcm', key, iv);
   cipher.setAAD(header);
   const body = Buffer.concat([cipher.update(Buffer.from(plaintext, 'utf8')), cipher.final(), cipher.getAuthTag()]);
   return {
     name,
     key: b64url(key),
-    keyId: keyId.toString('hex'),
     iv: iv.toString('hex'),
     plaintext,
     envelope: Buffer.concat([header, body]).toString('hex'),

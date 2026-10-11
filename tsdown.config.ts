@@ -2,8 +2,8 @@ import { defineConfig } from 'tsdown';
 
 export default defineConfig([
   {
-    // Node side: the plugin, the shared core and the CLI. vite stays external (peer dependency).
-    entry: ['src/index.ts', 'src/core.ts', 'src/cli.ts'],
+    // Node side: the plugin and the CLI. vite stays external (peer dependency).
+    entry: ['src/index.ts', 'src/cli.ts'],
     platform: 'node',
     format: 'esm',
     fixedExtension: false,

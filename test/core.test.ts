@@ -2,19 +2,21 @@ import { describe, expect, it } from 'vitest';
 import {
   HEADER_BYTES,
   KeyholeError,
-  MAX_PLAINTEXT_BYTES,
+  base64UrlDecode,
   base64UrlEncode,
   decrypt,
   encrypt,
   generateKey,
   gunzip,
   gzip,
-  keyId,
   openPayload,
   parseKey,
   readHeader,
   sealPayload,
+  unwrapKey,
+  wrapKey,
 } from '../src/core.ts';
+import { createDecipheriv, pbkdf2Sync } from 'node:crypto';
 import vectors from './vectors.json' with { type: 'json' };
 
 const hex = (bytes: Uint8Array) => Buffer.from(bytes).toString('hex');
@@ -54,7 +56,6 @@ describe('known-answer vectors (generated with node:crypto)', () => {
   for (const v of vectors) {
     it(v.name, async () => {
       const key = parseKey(v.key)!;
-      expect(hex(await keyId(key))).toBe(v.keyId);
       expect(hex(await encrypt(utf8(v.plaintext), key, fromHex(v.iv)))).toBe(v.envelope);
       expect(new TextDecoder().decode(await decrypt(fromHex(v.envelope), key))).toBe(v.plaintext);
     });
@@ -68,15 +69,15 @@ describe('envelope', () => {
   it('round trips with a fresh IV each time', async () => {
     const a = await encrypt(plaintext, key);
     const b = await encrypt(plaintext, key);
-    expect(hex(readHeader(a).iv)).not.toBe(hex(readHeader(b).iv));
+    expect(hex(readHeader(a))).not.toBe(hex(readHeader(b)));
     expect(await decrypt(a, key)).toEqual(plaintext);
     expect(await decrypt(b, key)).toEqual(plaintext);
   });
 
   it('fails authentication when any single byte is flipped', async () => {
     const envelope = await encrypt(plaintext, key);
-    // Header bytes are covered as AAD; magic, version and key ID have their own checks.
-    const expected = (i: number) => (i < 4 ? 'corrupt' : i === 4 ? 'unsupported-version' : i < 9 ? 'wrong-key' : 'auth-failed');
+    // Header bytes are covered as AAD; magic and version have their own checks.
+    const expected = (i: number) => (i < 4 ? 'corrupt' : i === 4 ? 'unsupported-version' : 'auth-failed');
     for (let i = 0; i < envelope.length; i++) {
       const tampered = envelope.slice();
       tampered[i] ^= 0x01;
@@ -84,9 +85,9 @@ describe('envelope', () => {
     }
   });
 
-  it('reports a different key as wrong-key before trying to decrypt', async () => {
+  it('fails authentication with a different key', async () => {
     const envelope = await encrypt(plaintext, key);
-    expect(await kind(decrypt(envelope, parseKey(generateKey())!))).toBe('wrong-key');
+    expect(await kind(decrypt(envelope, parseKey(generateKey())!))).toBe('auth-failed');
   });
 
   it('rejects unknown versions and truncated or foreign files', async () => {
@@ -110,11 +111,35 @@ describe('envelope', () => {
   });
 });
 
+describe('password wrapping', () => {
+  const key = parseKey(generateKey())!;
+
+  it('unwraps with the right password only', async () => {
+    const wrapped = await wrapKey(key, 'correct horse');
+    expect(await unwrapKey(wrapped, 'correct horse')).toEqual(key);
+    expect(await unwrapKey(wrapped, 'wrong horse')).toBeNull();
+  });
+
+  it('uses a fresh salt each time', async () => {
+    expect((await wrapKey(key, 'pw')).salt).not.toBe((await wrapKey(key, 'pw')).salt);
+  });
+
+  it('matches PBKDF2-SHA256 (600000 iterations) + AES-256-GCM in node:crypto', async () => {
+    // NFC-normalized: 'é' typed as e + combining accent unlocks too.
+    const wrapped = await wrapKey(key, 'caf\u00e9');
+    const derived = pbkdf2Sync('caf\u00e9', base64UrlDecode(wrapped.salt), 600_000, 32, 'sha256');
+    const sealed = base64UrlDecode(wrapped.key);
+    const decipher = createDecipheriv('aes-256-gcm', derived, base64UrlDecode(wrapped.iv));
+    decipher.setAuthTag(sealed.subarray(-16));
+    expect(new Uint8Array(Buffer.concat([decipher.update(sealed.subarray(0, -16)), decipher.final()]))).toEqual(key);
+    expect(await unwrapKey(wrapped, 'cafe\u0301')).toEqual(key);
+  });
+});
+
 describe('gzip and payload', () => {
-  it('caps decompressed size', async () => {
+  it('round trips gzip and rejects invalid input', async () => {
     const big = await gzip(new Uint8Array(100_000));
     expect((await gunzip(big)).length).toBe(100_000);
-    expect(await kind(gunzip(big, 99_999))).toBe('too-large');
     expect(await kind(gunzip(utf8('not gzip')))).toBe('corrupt');
   });
 
@@ -123,13 +148,6 @@ describe('gzip and payload', () => {
     const payload = { html: '<!doctype html><title>t</title>', js: 'console.log("ünï")' };
     const envelope = await sealPayload(payload, key);
     expect(await openPayload(envelope, key)).toEqual(payload);
-  });
-
-  it('refuses to seal more than openPayload can unpack', async () => {
-    const key = parseKey(generateKey())!;
-    // Compresses far below the envelope limit, but would exceed the loader's decompression cap.
-    const payload = { html: '', js: 'a'.repeat(MAX_PLAINTEXT_BYTES) };
-    expect(await kind(sealPayload(payload, key))).toBe('too-large');
   });
 
   it('rejects an authentic envelope that is not a payload', async () => {

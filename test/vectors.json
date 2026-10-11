@@ -2,25 +2,22 @@
   {
     "name": "empty plaintext, zero key",
     "key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-    "keyId": "3e291a25",
     "iv": "000000000000000000000000",
     "plaintext": "",
-    "envelope": "4b59484c013e291a25000000000000000000000000970e792885f90376d6bca131ae96df76"
+    "envelope": "4b59484c01000000000000000000000000efa7057d6142c0ff16bdf9760719a213"
   },
   {
     "name": "short text",
     "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
-    "keyId": "63e3f490",
     "iv": "cafebabefacedbaddecaf888",
     "plaintext": "hello keyhole",
-    "envelope": "4b59484c0163e3f490cafebabefacedbaddecaf888e2c6cc4ac55a247e3f6332b11eae836ef37d7a71f63f03bcdaf3a46eed"
+    "envelope": "4b59484c01cafebabefacedbaddecaf888e2c6cc4ac55a247e3f6332b11e3369b05f60c4d6619c2c78fbd6c519db"
   },
   {
     "name": "multi-block unicode",
     "key": "__________________________________________8",
-    "keyId": "2533a58c",
     "iv": "0102030405060708090a0b0c",
     "plaintext": "Ünïcödé ✓ — Ünïcödé ✓ — Ünïcödé ✓ — Ünïcödé ✓ — Ünïcödé ✓ — Ünïcödé ✓ — Ünïcödé ✓ — Ünïcödé ✓ — Ünïcödé ✓ — Ünïcödé ✓ — ",
-    "envelope": "4b59484c012533a58c0102030405060708090a0b0cadcb44cd1ea38a65b4c1e375a1b1e4c90e0cd11306d782ae64898cd7877cabd94ad97525e4ffa4f0930f06ebedb6232e087ee086ef1a9e3bf0a4ccc1bd4bd5ab53647568bc71684f9de0908228a270395df62a29fdaa368c86552ac796d83982e11a1f8c4846395ead3d07bd8758fffb28d68c0dc897285873539d0e1cee7d492697e9d3c77321b1a5d1ed37ec5a4d1914c2f112c2a370c286d20cf92696a0ccc58064ad4516a82b9738b69112a80af4ef4741a41f542ddeb2e19b2874780d3c66249f639c8792700929a1310310e7affd8f6e199dc723ee"
+    "envelope": "4b59484c010102030405060708090a0b0cadcb44cd1ea38a65b4c1e375a1b1e4c90e0cd11306d782ae64898cd7877cabd94ad97525e4ffa4f0930f06ebedb6232e087ee086ef1a9e3bf0a4ccc1bd4bd5ab53647568bc71684f9de0908228a270395df62a29fdaa368c86552ac796d83982e11a1f8c4846395ead3d07bd8758fffb28d68c0dc897285873539d0e1cee7d492697e9d3c77321b1a5d1ed37ec5a4d1914c2f112c2a370c286d20cf92696a0ccc58064ad4516a82b9738b69112a80af4ef4741a41f542ddeb2e19b2874780d3c66249f639c8792709c5c1d59e3342b6b8113d1f3a7c1e25f"
   }
 ]
