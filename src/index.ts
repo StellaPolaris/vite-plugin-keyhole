@@ -1,7 +1,7 @@
 // The Vite plugin. During `vite build` it turns the app's output into index.html (landing page, inline
 // loader and the encrypted app) and 404.html (the same, for deep links). `vite dev` is untouched.
 import { readFileSync } from 'node:fs';
-import { readdir, stat } from 'node:fs/promises';
+import { readdir, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { loadEnv } from 'vite';
 import type { Plugin, ResolvedConfig, Rolldown, UserConfig } from 'vite';
@@ -47,6 +47,9 @@ export default function keyhole(options: KeyholeOptions = {}): Plugin {
 
     config(user) {
       overridden = ignoredSettings(user);
+      // mergeConfig would append an output object to an array of outputs instead of merging into each one.
+      const outputs = user.build?.rolldownOptions?.output;
+      if (Array.isArray(outputs)) for (const output of outputs) output.codeSplitting = false;
       return {
         build: {
           // Everything must end up inside the one encrypted payload.
@@ -55,7 +58,7 @@ export default function keyhole(options: KeyholeOptions = {}): Plugin {
           sourcemap: false,
           manifest: false,
           modulePreload: { polyfill: false },
-          rolldownOptions: { output: { codeSplitting: false } },
+          rolldownOptions: Array.isArray(outputs) ? {} : { output: { codeSplitting: false } },
         },
       };
     },
@@ -71,17 +74,23 @@ export default function keyhole(options: KeyholeOptions = {}): Plugin {
       }
       // Vite copies public/ before closeBundle can check the output, so refuse here, before anything is written.
       if (resolved.build.copyPublicDir && resolved.publicDir) {
-        const unlisted = (await listFiles(resolved.publicDir, { allowMissing: true, skipGit: false })).filter((f) => !published(f));
+        const files = await listFiles(resolved.publicDir, { allowMissing: true, skipGit: false });
+        if (spaFallback && files.includes('404.html')) {
+          throw new Error('vite-plugin-keyhole: spaFallback would overwrite public/404.html. Set spaFallback: false to publish your own.');
+        }
+        const unlisted = files.filter((f) => !published(f));
         if (unlisted.length) {
           throw new Error(
             `vite-plugin-keyhole: ${path.relative(resolved.root, resolved.publicDir)}/ would be copied unencrypted:\n  ${unlisted.join('\n  ')}\n` +
               `To publish them as they are, add keyhole({ publish: ${JSON.stringify([...publish, ...unlisted])} }).\n` +
-              'To leave them out, remove them or set build.copyPublicDir to false.',
+              'To encrypt them, move them into src/ and import them. To leave them out, remove them or set build.copyPublicDir to false.',
           );
         }
       }
 
-      // The KEYHOLE_ prefix is not in envPrefix, so Vite never exposes these to client code.
+      // As long as no envPrefix matches KEYHOLE_, Vite never exposes these to client code.
+      const exposing = [resolved.envPrefix ?? []].flat().filter((p) => 'KEYHOLE_KEY'.startsWith(p) || 'KEYHOLE_PASSWORD'.startsWith(p));
+      if (exposing.length) throw new Error(`vite-plugin-keyhole: envPrefix ${JSON.stringify(exposing)} would expose the key to client code.`);
       const env = loadEnv(resolved.mode, resolved.envDir, 'KEYHOLE_');
       const keyText = (options.key ?? env.KEYHOLE_KEY)?.trim();
       const help = `Set KEYHOLE_KEY, for example in .env.production.local:\n  KEYHOLE_KEY=${generateKey()}`;
@@ -102,7 +111,9 @@ export default function keyhole(options: KeyholeOptions = {}): Plugin {
     outputOptions(output) {
       // Runs before Vite empties the output folder and copies public/, for every output and after other plugins.
       // closeBundle only checks build.outDir, so writing anywhere else would skip the plaintext check.
-      if (output.file || (output.dir && path.resolve(config.root, output.dir) !== outDir)) {
+      // Vite resolves a relative dir from the root but Rolldown from the working directory: both must match.
+      const elsewhere = output.dir && (path.resolve(config.root, output.dir) !== outDir || path.resolve(output.dir) !== outDir);
+      if (output.file || elsewhere) {
         throw new Error('vite-plugin-keyhole: set build.outDir instead of overriding the output dir or file.');
       }
     },
@@ -112,6 +123,7 @@ export default function keyhole(options: KeyholeOptions = {}): Plugin {
       // chunks (e.g. the __VITE_PRELOAD__ marker of dynamic imports). Sealing earlier would encrypt unfinished code.
       order: 'post',
       async handler(_output, bundle) {
+        if (spaFallback && bundle['404.html']) this.error('vite-plugin-keyhole: spaFallback would overwrite the 404.html another plugin emits. Set spaFallback: false to publish it.');
         const files = Object.values(bundle).filter((f) => !published(f.fileName));
         const chunks = files.filter((f): f is Rolldown.OutputChunk => f.type === 'chunk');
         const css = files.filter((f): f is Rolldown.OutputAsset => f.type === 'asset' && f.fileName.endsWith('.css'));
@@ -147,7 +159,7 @@ export default function keyhole(options: KeyholeOptions = {}): Plugin {
         for (const file of files) delete bundle[file.fileName];
         const publicHtml = publicPage(landing, loader, {
           payload: Buffer.from(envelope.buffer, envelope.byteOffset, envelope.byteLength).toString('base64url'),
-          storageKey: `keyhole:${config.base}`,
+          base: config.base,
           remember,
           password: wrapped,
         });
@@ -207,23 +219,30 @@ function tagPattern(tag: string, attr: string, fileName: string, tail: string): 
 }
 
 /**
- * Every file under `dir`, following symlinked folders. By default skips .git (a folder, or a file in a
- * worktree), which Vite's emptyOutDir keeps. Read errors throw, so the plaintext check never passes on a folder it couldn't read.
+ * Every file under `dir`, following symlinked folders (each real folder once, so loops end). By default skips
+ * .git (a folder, or a file in a worktree), which Vite's emptyOutDir keeps. A broken symlink counts as a file.
+ * Read errors throw, so the plaintext check never passes on a folder it couldn't read.
  */
-async function listFiles(dir: string, { allowMissing = false, skipGit = true, prefix = '' } = {}): Promise<string[]> {
-  let names: string[];
+async function listFiles(dir: string, { allowMissing = false, skipGit = true, prefix = '', seen = new Set<string>() } = {}): Promise<string[]> {
+  let entries;
   try {
-    names = await readdir(dir);
+    seen.add(await realpath(dir));
+    entries = await readdir(dir, { withFileTypes: true });
   } catch (error) {
     if (allowMissing && (error as NodeJS.ErrnoException).code === 'ENOENT') return [];
     throw error;
   }
-  const out: string[] = [];
-  for (const name of names) {
-    if (skipGit && name === '.git') continue;
-    const full = path.join(dir, name);
-    if ((await stat(full)).isDirectory()) out.push(...(await listFiles(full, { skipGit, prefix: `${prefix}${name}/` })));
-    else out.push(prefix + name);
-  }
-  return out;
+  const lists = await Promise.all(
+    entries.map(async (entry) => {
+      if (skipGit && entry.name === '.git') return [];
+      const full = path.join(dir, entry.name);
+      const isDir = entry.isDirectory() || (entry.isSymbolicLink() && (await stat(full).catch(() => null))?.isDirectory());
+      if (!isDir) return [prefix + entry.name];
+      const real = await realpath(full);
+      if (seen.has(real)) return [];
+      seen.add(real);
+      return listFiles(full, { skipGit, prefix: `${prefix}${entry.name}/`, seen });
+    }),
+  );
+  return lists.flat();
 }

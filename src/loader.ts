@@ -8,8 +8,8 @@ import type { Payload, WrappedKey } from './core.ts';
 interface Config {
   /** The encrypted app, base64url. */
   payload: string;
-  /** Storage entry name, namespaced by base path because sites on one origin share storage. */
-  storageKey: string;
+  /** Vite's base. Namespaces the storage entry, because sites on one origin share storage. */
+  base: string;
   remember: boolean;
   /** The key, encrypted under the site password. Present only when a password is set. */
   password?: WrappedKey;
@@ -18,6 +18,8 @@ interface Config {
 type State = 'loading' | 'locked' | 'password' | 'wrong-password' | 'unsupported';
 
 const config: Config = JSON.parse(document.getElementById('keyhole-config')!.textContent!);
+// A relative base ('./') resolves to this site's folder, so two such sites on one origin don't share an entry.
+const storageKey = `keyhole:${new URL(config.base, location.href).pathname}`;
 
 function show(state: State): void {
   document.documentElement.dataset.keyhole = state;
@@ -26,22 +28,24 @@ function show(state: State): void {
 // ---- storage (blocked storage is fine: links still work, reloads show the landing page) ----
 
 function storedKey(): string | null {
+  // With remember off, also drop a key that an earlier build saved.
+  if (!config.remember) forgetKey();
   try {
-    return config.remember ? localStorage.getItem(config.storageKey) : null;
+    return localStorage.getItem(storageKey);
   } catch {
     return null;
   }
 }
 
-function saveKey(key: string): void {
+function saveKey(key: Uint8Array): void {
   try {
-    if (config.remember) localStorage.setItem(config.storageKey, key);
+    if (config.remember) localStorage.setItem(storageKey, base64UrlEncode(key));
   } catch {}
 }
 
 function forgetKey(): void {
   try {
-    localStorage.removeItem(config.storageKey);
+    localStorage.removeItem(storageKey);
   } catch {}
 }
 
@@ -57,12 +61,11 @@ function supported(): boolean {
 }
 
 /** Decrypt and run the app with `key`. Returns false if the key doesn't open it. */
-async function open(key: string): Promise<boolean> {
-  const raw = parseKey(key);
-  if (!raw) return false;
+async function open(key: Uint8Array | null): Promise<boolean> {
+  if (!key) return false;
   let payload: Payload;
   try {
-    payload = await openPayload(base64UrlDecode(config.payload), raw);
+    payload = await openPayload(base64UrlDecode(config.payload), key);
   } catch (error) {
     console.warn('keyhole:', error);
     return false;
@@ -72,21 +75,19 @@ async function open(key: string): Promise<boolean> {
   return true;
 }
 
-/** Replace this document with the app's, run its scripts in order, then import its module. */
+/** Replace this document with the app's, run its scripts as the browser would have, then import its module. */
 async function run(payload: Payload): Promise<void> {
   const app = new DOMParser().parseFromString(payload.html, 'text/html').documentElement;
   document.replaceChild(document.adoptNode(app), document.documentElement);
   // Parsed scripts never run. Re-create them so analytics or theme snippets in index.html work as usual.
+  // As during parsing, defer and module scripts run after the others, in order (async ones don't wait).
+  // Judge by the originals' attributes: a created script reports async = true by default.
+  const deferred: HTMLScriptElement[] = [];
   for (const old of document.querySelectorAll('script')) {
-    const script = document.createElement('script');
-    for (const { name, value } of old.attributes) script.setAttribute(name, value);
-    script.text = old.text;
-    // Judge by the original's attributes: a created script reports async = true by default.
-    const blocking = old.src && !old.async && !old.defer && old.type !== 'module';
-    const loaded = blocking && new Promise((done) => (script.onload = script.onerror = done));
-    old.replaceWith(script);
-    await loaded;
+    if (!old.async && (isModule(old) || (old.defer && old.src))) deferred.push(old);
+    else await rerun(old);
   }
+  for (const old of deferred) await rerun(old);
   const url = URL.createObjectURL(new Blob([payload.js], { type: 'text/javascript' }));
   try {
     await import(url);
@@ -95,10 +96,25 @@ async function run(payload: Payload): Promise<void> {
   }
 }
 
+function isModule(script: HTMLScriptElement): boolean {
+  return script.type.trim().toLowerCase() === 'module';
+}
+
+/** Run a parsed script, waiting for it if it is external and not async: created scripts run whenever they load. */
+async function rerun(old: HTMLScriptElement): Promise<void> {
+  const script = document.createElement('script');
+  for (const { name, value } of old.attributes) script.setAttribute(name, value);
+  script.text = old.text;
+  // Scripts the browser won't run (nomodule, a non-JavaScript type) are never fetched and fire no load event.
+  const classic = /^((text|application)\/(x-)?(java|ecma)script|text\/jscript)?$/i.test(old.type.trim()) && !old.noModule;
+  const loaded = old.src && !old.async && (classic || isModule(old)) && new Promise((done) => (script.onload = script.onerror = done));
+  old.replaceWith(script);
+  await loaded;
+}
+
 async function unlockWithPassword(password: string): Promise<void> {
   show('loading');
-  const key = await unwrapKey(config.password!, password);
-  if (!(key && (await open(base64UrlEncode(key))))) show('wrong-password');
+  if (!(await open(await unwrapKey(config.password!, password)))) show('wrong-password');
 }
 
 async function main(): Promise<void> {
@@ -124,12 +140,17 @@ async function main(): Promise<void> {
     if (input?.value) void unlockWithPassword(input.value);
   });
 
-  const key = fromUrl ?? storedKey();
-  if (key) {
+  // A broken link (cut off, or for another site) falls back to the saved key.
+  if (fromUrl) {
     show('loading');
-    if (await open(key)) return;
+    if (await open(parseKey(fromUrl))) return;
+  }
+  const saved = storedKey();
+  if (saved) {
+    show('loading');
+    if (saved !== fromUrl && (await open(parseKey(saved)))) return;
     // A saved key that no longer opens the app is from before a key change.
-    if (fromUrl === undefined) forgetKey();
+    forgetKey();
   }
   show(config.password ? 'password' : 'locked');
 }

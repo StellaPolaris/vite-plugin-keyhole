@@ -3,6 +3,14 @@
   "version": "0.0.0",
   "description": "Encrypt a whole Vite build so it opens only with a link key or a password",
   "license": "MIT",
+  "keywords": [
+    "vite",
+    "vite-plugin",
+    "encryption",
+    "password-protect",
+    "github-pages",
+    "static-site"
+  ],
   "type": "module",
   "exports": {
     ".": {

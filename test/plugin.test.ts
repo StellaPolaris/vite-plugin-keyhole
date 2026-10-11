@@ -1,5 +1,5 @@
 // Builds test/fixture with the published plugin (dist/) and checks the output files.
-import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { build, createLogger } from 'vite';
 import type { InlineConfig } from 'vite';
@@ -65,7 +65,7 @@ describe('fixture build', () => {
     const index = readFileSync(path.join(outDir, 'index.html'), 'utf8');
     expect(readFileSync(path.join(outDir, '404.html'), 'utf8')).toBe(index);
     expect(index).toContain('<title>Coming soon</title>');
-    expect(pageConfig()).toMatchObject({ storageKey: 'keyhole:/my-site/', remember: true });
+    expect(pageConfig()).toMatchObject({ base: '/my-site/', remember: true });
     expect(pageConfig().password).toBeUndefined();
 
     // After decrypting, everything is there.
@@ -106,6 +106,28 @@ describe('fixture build', () => {
     expect(listFiles(outDir)).toEqual(['404.html', 'index.html']);
   });
 
+  it('applies codeSplitting: false to every output when output is an array', async () => {
+    // mergeConfig would otherwise append a second output, and the user's would still split the lazy import.
+    await buildFixture({ key: generateKey() }, { build: { rolldownOptions: { output: [{ entryFileNames: 'app.js' }] } } });
+    expect(listFiles(outDir)).toEqual(['404.html', 'index.html']);
+  });
+
+  it('refuses to overwrite a public/404.html with spaFallback', async () => {
+    mkdirSync(publicDir, { recursive: true });
+    writeFileSync(path.join(publicDir, '404.html'), 'custom 404');
+    await expect(buildFixture({ key: generateKey(), publish: ['404.html'] })).rejects.toThrow(/overwrite public\/404\.html/);
+    await buildFixture({ key: generateKey(), publish: ['404.html'], spaFallback: false });
+    expect(readFileSync(path.join(outDir, '404.html'), 'utf8')).toBe('custom 404');
+  });
+
+  it('follows symlinks in public/ without looping', async () => {
+    mkdirSync(path.join(publicDir, 'icons'), { recursive: true });
+    writeFileSync(path.join(publicDir, 'icons', 'a.svg'), '<svg/>');
+    symlinkSync('..', path.join(publicDir, 'icons', 'loop'));
+    symlinkSync('missing', path.join(publicDir, 'broken'));
+    await expect(buildFixture({ key: generateKey() })).rejects.toThrow(/copied unencrypted:\s+broken\s+icons\/a\.svg\s+To publish/);
+  });
+
   it('skips 404.html when spaFallback is off', async () => {
     await buildFixture({ key: generateKey(), spaFallback: false });
     expect(listFiles(outDir)).toEqual(['index.html']);
@@ -115,6 +137,12 @@ describe('fixture build', () => {
     // The error suggests a freshly generated key to paste.
     await expect(buildFixture({})).rejects.toThrow(/no key[\s\S]*KEYHOLE_KEY=[A-Za-z0-9_-]{43}/);
     await expect(buildFixture({ key: 'not-a-key' })).rejects.toThrow(/not a 43-character/);
+  });
+
+  it('fails when envPrefix would expose the key or password', async () => {
+    await expect(buildFixture({ key: generateKey() }, { envPrefix: ['VITE_', 'KEY'] })).rejects.toThrow(/envPrefix \["KEY"\]/);
+    await expect(buildFixture({ key: generateKey() }, { envPrefix: 'KEYHOLE_PASS' })).rejects.toThrow(/would expose/);
+    await buildFixture({ key: generateKey() }, { envPrefix: ['VITE_', 'APP_'] });
   });
 
   it('fails when public/ files would be copied unencrypted', async () => {
@@ -150,6 +178,10 @@ describe('fixture build', () => {
         buildFixture({ key: generateKey() }, { build: { rolldownOptions: { output: { dir: elsewhere } } } }),
       ).rejects.toThrow(/set build\.outDir/);
       expect(() => readdirSync(elsewhere)).toThrow();
+      // Vite resolves 'dist' from the root (fixture/dist, the outDir), Rolldown from the working directory.
+      await expect(
+        buildFixture({ key: generateKey() }, { build: { rolldownOptions: { output: { dir: 'dist' } } } }),
+      ).rejects.toThrow(/set build\.outDir/);
     } finally {
       rmSync(elsewhere, { recursive: true, force: true });
     }
