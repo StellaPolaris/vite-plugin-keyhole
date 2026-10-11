@@ -1,8 +1,16 @@
 {
   "name": "vite-plugin-keyhole",
-  "version": "0.0.0",
+  "version": "1.2.11",
   "description": "Encrypt a whole Vite build so it opens only with a link key or a password",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/StellaPolaris/vite-plugin-keyhole.git"
+  },
+  "homepage": "https://github.com/StellaPolaris/vite-plugin-keyhole#readme",
+  "bugs": {
+    "url": "https://github.com/StellaPolaris/vite-plugin-keyhole/issues"
+  },
   "keywords": [
     "vite",
     "vite-plugin",
@@ -22,13 +30,15 @@
     "keyhole": "./dist/cli.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "FORMAT.md"
   ],
   "engines": {
     "node": ">=22.12"
   },
   "scripts": {
     "build": "tsdown",
+    "prepack": "npm run build",
     "typecheck": "tsc --noEmit",
     "test": "tsdown && vitest run",
     "vectors": "node test/make-vectors.mjs > test/vectors.json"

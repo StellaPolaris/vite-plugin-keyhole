@@ -3,6 +3,13 @@
 Encrypt a whole Vite build so it can live on any public static host (GitHub Pages, for example), yet
 opens only for people with the link, or the password if you set one.
 
+Best for small client previews, prototypes and interactive reports: the whole encrypted app downloads
+upfront, including assets. Requires Vite 8, Node.js 22.12 or newer, and HTTPS in production.
+
+```sh
+npm install -D vite-plugin-keyhole
+```
+
 ```ts
 // vite.config.ts
 import { defineConfig } from 'vite';
@@ -16,7 +23,6 @@ export default defineConfig({
 ```
 
 ```sh
-npm install -D vite-plugin-keyhole
 npx keyhole keygen                                    # prints a new key
 echo "KEYHOLE_KEY=<that key>" >> .env.production.local
 echo "KEYHOLE_PASSWORD=<a long passphrase>" >> .env.production.local   # optional
@@ -25,6 +31,11 @@ npx vite build
 
 Share `https://me.github.io/my-site/#key=<that key>`, or the password. `vite dev` is unchanged and
 needs no key. No app code is needed.
+
+To check the production build locally, run `npx vite preview` and open the printed address with
+`/my-site/#key=<that key>` (matching the `base` above). Visit `#logout` to check the locked page.
+Keep `.env.production.local` out of Git; in CI, provide `KEYHOLE_KEY` and the optional
+`KEYHOLE_PASSWORD` as build secrets. Deploy only the generated `dist/` folder.
 
 ## What gets published
 

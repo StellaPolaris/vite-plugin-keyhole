@@ -1,3 +1,5 @@
 node_modules
 dist
 test/fixture/dist
+.env*.local
+*.tgz
