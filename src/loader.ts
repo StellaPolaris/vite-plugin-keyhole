@@ -12,12 +12,13 @@ interface Config {
   remember: 'local' | 'session' | 'none';
 }
 
-type State = 'loading' | 'landing' | 'retry';
+type State = 'loading' | 'landing' | 'retry' | 'unsupported';
 
 const config: Config = JSON.parse(document.getElementById('keyhole-config')!.textContent!);
 /** sessionStorage entry that stops automatic reloads from looping. */
 const RELOADED_AT = `${config.storageKey}:reloaded`;
-let busy = false;
+/** Bumped by every unlock. An older attempt still downloading sees the change and stops, so the newest key wins. */
+let attempt = 0;
 let running = false;
 /** Keys from the current attempt, kept in memory so Retry works even before anything is saved. */
 let lastKeys: string[] = [];
@@ -28,6 +29,8 @@ function show(state: State): void {
   document.documentElement.dataset.keyhole = state;
   const retry = document.getElementById('keyhole-retry');
   if (retry) retry.hidden = state !== 'retry';
+  const unsupported = document.getElementById('keyhole-unsupported');
+  if (unsupported) unsupported.hidden = state !== 'unsupported';
 }
 
 function offerRetry(action: 'again' | 'reload'): void {
@@ -105,7 +108,17 @@ async function download(): Promise<Uint8Array> {
   const response = await fetch(config.payload, { cache: 'no-cache', credentials: 'same-origin' });
   if (response.status === 404 || response.status === 410) throw new StalePage(`payload: HTTP ${response.status}`);
   if (!response.ok || !response.body) throw new Error(`payload: HTTP ${response.status}`);
-  return readBounded(response.body, MAX_ENVELOPE_BYTES);
+  // Hosts that rewrite every path to index.html answer a missing payload with 200 and HTML.
+  // Only HTML counts as stale: a damaged binary also fails the header check, and should be downloaded again.
+  if (/^text\/html\b/i.test(response.headers.get('content-type') ?? '')) {
+    void response.body.cancel().catch(() => {});
+    throw new StalePage('payload: got an HTML page');
+  }
+  const bytes = await readBounded(response.body, MAX_ENVELOPE_BYTES);
+  if (/^\s*<(!doctype|html|head|body|!--)/i.test(new TextDecoder().decode(bytes.subarray(0, 64)))) {
+    throw new StalePage('payload: got an HTML page');
+  }
+  return bytes;
 }
 
 /** Reload once to fetch the current HTML. If that already happened in the last minute, offer Retry. */
@@ -121,53 +134,58 @@ function recoverStalePage(): void {
 }
 
 async function unlock(keys: string[]): Promise<void> {
-  if (busy || running) return;
-  busy = true;
+  if (running) return;
+  const id = ++attempt;
+  /** A newer attempt has started: this one must not touch the page, storage or the URL any more. */
+  const superseded = () => id !== attempt || running;
   lastKeys = keys;
   show('loading');
+
+  let envelope: Uint8Array;
+  let header;
   try {
-    let envelope: Uint8Array;
-    let header;
-    try {
-      envelope = await download();
-      header = readHeader(envelope);
-    } catch (error) {
-      // Never forget the key here. A missing file or unknown version means this page is outdated;
-      // anything else (offline, server error, damaged file) is worth trying again in place.
-      console.warn('keyhole:', error);
-      const stale = error instanceof StalePage || (error instanceof KeyholeError && error.kind === 'unsupported-version');
-      return stale ? recoverStalePage() : offerRetry('again');
-    }
-
-    // Pick the key this file was encrypted with. A saved key that doesn't match is stale: forget it.
-    let match: { text: string; raw: Uint8Array } | null = null;
-    for (const text of keys) {
-      const raw = parseKey(text);
-      if (raw && equalBytes(await keyId(raw), header.keyId)) {
-        match = { text, raw };
-        break;
-      }
-      if (text === storedKey()) forgetKey();
-    }
-    if (!match) return show('landing');
-
-    let payload: Payload;
-    try {
-      payload = await openPayload(envelope, match.raw);
-    } catch (error) {
-      // The key ID matched, so this is a damaged file, not a wrong key: keep the key.
-      console.warn('keyhole:', error);
-      return offerRetry('again');
-    }
-    saveKey(match.text);
-    try {
-      sessionStorage.removeItem(RELOADED_AT);
-    } catch {}
-    running = true;
-    await run(payload);
-  } finally {
-    busy = false;
+    envelope = await download();
+    header = readHeader(envelope);
+  } catch (error) {
+    if (superseded()) return;
+    // Never forget the key here. A missing file or unknown version means this page is outdated;
+    // anything else (offline, server error, damaged file) is worth trying again in place.
+    console.warn('keyhole:', error);
+    const stale = error instanceof StalePage || (error instanceof KeyholeError && error.kind === 'unsupported-version');
+    return stale ? recoverStalePage() : offerRetry('again');
   }
+  if (superseded()) return;
+
+  // Pick the key this file was encrypted with. A saved key that doesn't match is stale: forget it.
+  let match: { text: string; raw: Uint8Array } | null = null;
+  for (const text of keys) {
+    const raw = parseKey(text);
+    const matches = raw && equalBytes(await keyId(raw), header.keyId);
+    if (superseded()) return;
+    if (raw && matches) {
+      match = { text, raw };
+      break;
+    }
+    if (text === storedKey()) forgetKey();
+  }
+  if (!match) return show('landing');
+
+  let payload: Payload;
+  try {
+    payload = await openPayload(envelope, match.raw);
+  } catch (error) {
+    if (superseded()) return;
+    // The key ID matched, so this is a damaged file, not a wrong key: keep the key.
+    console.warn('keyhole:', error);
+    return offerRetry('again');
+  }
+  if (superseded()) return;
+  saveKey(match.text);
+  try {
+    sessionStorage.removeItem(RELOADED_AT);
+  } catch {}
+  running = true;
+  await run(payload);
 }
 
 /** Replace this document with the app's, then run the app's module. */
@@ -189,10 +207,18 @@ async function run(payload: Payload): Promise<void> {
   }
 }
 
-function start(fromUrl?: string): void {
-  const keys = [fromUrl, storedKey()].filter((k, i, all): k is string => !!k && all.indexOf(k) === i);
+function start(): void {
+  if (!supported()) {
+    // Leave #key=… in the address bar: the same link works over HTTPS or in a newer browser.
+    // Only a visitor who has a key learns why nothing opened; everyone else gets the plain landing page.
+    const hasKey = location.hash.startsWith('#key=') || !!storedKey();
+    if (hasKey) console.warn('keyhole: this page needs HTTPS and a browser with WebCrypto and DecompressionStream.');
+    return show(hasKey ? 'unsupported' : 'landing');
+  }
+  const fragment = takeFragment();
+  if (fragment.logout) forgetKey();
+  const keys = [fragment.key, storedKey()].filter((k, i, all): k is string => !!k && all.indexOf(k) === i);
   if (keys.length === 0) return show('landing');
-  if (!supported()) return show('landing');
   void unlock(keys);
 }
 
@@ -203,18 +229,18 @@ function main(): void {
 
   // A key or logout link for the page that is already open only changes the fragment.
   addEventListener('hashchange', () => {
-    const fragment = takeFragment();
-    if (fragment.logout) {
+    if (location.hash === '#logout') {
+      takeFragment();
       forgetKey();
       location.reload();
-    } else if (fragment.key && !running) {
-      start(fragment.key);
+    } else if (running) {
+      takeFragment(); // the app is open: just keep a pasted key out of the address bar
+    } else if (location.hash.startsWith('#key=')) {
+      start(); // replaces any attempt still in progress
     }
   });
 
-  const fragment = takeFragment();
-  if (fragment.logout) forgetKey();
-  start(fragment.key);
+  start();
 }
 
 main();

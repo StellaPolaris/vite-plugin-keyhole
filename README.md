@@ -41,7 +41,7 @@ so later visits open directly. `#logout` makes the browser forget it.
 | Option        | Default        | What it does                                                                |
 | ------------- | -------------- | --------------------------------------------------------------------------- |
 | `key`         | `KEYHOLE_KEY`  | The 43-character key. Read from the environment or `.env*` files by default. The build fails if it's missing or malformed. |
-| `landing`     | built-in page  | Path to your own landing HTML. It needs a `</body>`. An element with `id="keyhole-retry"` is shown when a download fails. |
+| `landing`     | built-in page  | Path to your own landing HTML. It needs a `</body>`. An element with `id="keyhole-retry"` is shown when a download fails, and one with `id="keyhole-unsupported"` when a visitor with a key opens it without HTTPS or in an old browser. |
 | `remember`    | `'local'`      | Where the key is kept after unlocking: `'local'`, `'session'` or `'none'`. Entries are namespaced by `base`. |
 | `spaFallback` | `true`         | Also write `404.html`.                                                      |
 
@@ -72,7 +72,9 @@ It does **not** protect against:
 One HTML entry, rendered in the browser (an SPA), fully bundled, with no web workers or service
 workers. The plugin forces one JS chunk, one inlined stylesheet and inlined assets, and the build fails
 with a list of files if the output looks different. It also fails if anything else ends up in the
-output folder, such as `public/` files, stale files or source maps.
+output folder, such as stale files or source maps. Files in `public/` fail the build before anything is
+written; set `build.copyPublicDir: false` to keep them out. Set the destination with `build.outDir`:
+overriding the output `dir` or `file` is refused.
 
 Your app starts after the page has finished loading, so a few things behave differently:
 
@@ -84,13 +86,15 @@ Your app starts after the page has finished loading, so a few things behave diff
 
 ## When something goes wrong
 
-The visitor sees the neutral landing page, never an error message. A saved key is forgotten only when
+The visitor sees the neutral landing page, never an error message. The only exception is a visitor
+who has a key but opened it without HTTPS or in a browser that can't decrypt: they see a short hint,
+and the key stays in the address bar. A saved key is forgotten only when
 it doesn't match the file (after a key change), never because of a failed download.
 
 | What happened                                        | What the loader does                                     |
 | ---------------------------------------------------- | -------------------------------------------------------- |
 | No key, or a key for a different build               | Landing page                                             |
-| The `.bin` is missing (404) or in a newer format     | The page is older than the current build: it reloads once to get the current HTML, then offers "Try again" |
+| The `.bin` is missing (404, or an HTML page from a host that rewrites every path) or in a newer format | The page is older than the current build: it reloads once to get the current HTML, then offers "Try again" |
 | Offline, server error, or a damaged download          | "Try again" downloads again                              |
 | The app throws while starting                        | Landing page back, "Try again" reloads; the error is in the console |
 

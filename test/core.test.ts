@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   HEADER_BYTES,
   KeyholeError,
+  MAX_PLAINTEXT_BYTES,
   base64UrlEncode,
   decrypt,
   encrypt,
@@ -96,6 +97,16 @@ describe('envelope', () => {
     expect(await kind(decrypt(envelope.slice(0, HEADER_BYTES + 15), key))).toBe('corrupt');
     expect(await kind(decrypt(utf8('<!doctype html><html>'), key))).toBe('corrupt');
     expect(await kind(decrypt(new Uint8Array(), key))).toBe('corrupt');
+    // Truncated files are corrupt even when the version byte is missing or wrong (FORMAT.md step 1 first).
+    expect(await kind(decrypt(utf8('KYHL'), key))).toBe('corrupt');
+    expect(await kind(decrypt(v2.slice(0, HEADER_BYTES + 15), key))).toBe('corrupt');
+  });
+
+  it('decrypts a view into a larger buffer', async () => {
+    const envelope = await encrypt(plaintext, key);
+    const padded = new Uint8Array(envelope.length + 10);
+    padded.set(envelope, 5);
+    expect(await decrypt(padded.subarray(5, 5 + envelope.length), key)).toEqual(plaintext);
   });
 });
 
@@ -112,6 +123,13 @@ describe('gzip and payload', () => {
     const payload = { html: '<!doctype html><title>t</title>', js: 'console.log("ünï")' };
     const envelope = await sealPayload(payload, key);
     expect(await openPayload(envelope, key)).toEqual(payload);
+  });
+
+  it('refuses to seal more than openPayload can unpack', async () => {
+    const key = parseKey(generateKey())!;
+    // Compresses far below the envelope limit, but would exceed the loader's decompression cap.
+    const payload = { html: '', js: 'a'.repeat(MAX_PLAINTEXT_BYTES) };
+    expect(await kind(sealPayload(payload, key))).toBe('too-large');
   });
 
   it('rejects an authentic envelope that is not a payload', async () => {

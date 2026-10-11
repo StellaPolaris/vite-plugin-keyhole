@@ -80,10 +80,9 @@ export async function keyId(key: Uint8Array): Promise<Uint8Array<ArrayBuffer>> {
 /** Parse and check the 21-byte header. Throws 'corrupt' or 'unsupported-version'. */
 export function readHeader(envelope: Uint8Array): Header {
   const magic = String.fromCharCode(...envelope.subarray(0, 4));
-  if (magic !== MAGIC) throw new KeyholeError('corrupt');
+  if (magic !== MAGIC || envelope.length < HEADER_BYTES + TAG_BYTES) throw new KeyholeError('corrupt');
   const version = envelope[4];
   if (version !== VERSION) throw new KeyholeError('unsupported-version');
-  if (envelope.length < HEADER_BYTES + TAG_BYTES) throw new KeyholeError('corrupt');
   return {
     version,
     keyId: envelope.slice(5, 5 + KEY_ID_BYTES),
@@ -131,23 +130,31 @@ export async function encrypt(
  * Throws 'corrupt', 'unsupported-version', 'wrong-key' or 'auth-failed'.
  */
 export async function decrypt(envelope: Uint8Array, key: Uint8Array): Promise<Uint8Array<ArrayBuffer>> {
-  const header = readHeader(envelope);
+  const bytes = bufferView(envelope);
+  const header = readHeader(bytes);
   if (!equalBytes(header.keyId, await keyId(key))) throw new KeyholeError('wrong-key');
   try {
     const plain = await crypto.subtle.decrypt(
       {
         name: 'AES-GCM',
         iv: header.iv,
-        additionalData: envelope.slice(0, HEADER_BYTES),
+        additionalData: bytes.subarray(0, HEADER_BYTES),
         tagLength: TAG_BYTES * 8,
       },
       await importKey(key, 'decrypt'),
-      envelope.slice(HEADER_BYTES),
+      bytes.subarray(HEADER_BYTES),
     );
     return new Uint8Array(plain);
   } catch {
     throw new KeyholeError('auth-failed');
   }
+}
+
+/** The same bytes as an ArrayBuffer-backed view, which Web APIs require. Copies only SharedArrayBuffer-backed input. */
+function bufferView(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
+  return bytes.buffer instanceof ArrayBuffer
+    ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+    : new Uint8Array(bytes);
 }
 
 // ---- compression ----
@@ -177,13 +184,13 @@ export async function readBounded(stream: ReadableStream<Uint8Array>, cap: numbe
 }
 
 export function gzip(bytes: Uint8Array): Promise<Uint8Array<ArrayBuffer>> {
-  return readBounded(new Blob([new Uint8Array(bytes)]).stream().pipeThrough(new CompressionStream('gzip')), Infinity);
+  return readBounded(new Blob([bufferView(bytes)]).stream().pipeThrough(new CompressionStream('gzip')), Infinity);
 }
 
 /** Decompress gzip with an output cap. Throws 'corrupt' on invalid gzip, 'too-large' over the cap. */
 export async function gunzip(bytes: Uint8Array, cap: number = MAX_PLAINTEXT_BYTES): Promise<Uint8Array<ArrayBuffer>> {
   try {
-    return await readBounded(new Blob([new Uint8Array(bytes)]).stream().pipeThrough(new DecompressionStream('gzip')), cap);
+    return await readBounded(new Blob([bufferView(bytes)]).stream().pipeThrough(new DecompressionStream('gzip')), cap);
   } catch (error) {
     throw error instanceof KeyholeError ? error : new KeyholeError('corrupt');
   }
@@ -198,9 +205,10 @@ export interface Payload {
   js: string;
 }
 
-/** gzip(JSON {html, js}), then encrypt. */
+/** gzip(JSON {html, js}), then encrypt. Throws 'too-large' if openPayload couldn't unpack the result. */
 export async function sealPayload(payload: Payload, key: Uint8Array): Promise<Uint8Array<ArrayBuffer>> {
   const json = new TextEncoder().encode(JSON.stringify({ html: payload.html, js: payload.js }));
+  if (json.byteLength > MAX_PLAINTEXT_BYTES) throw new KeyholeError('too-large');
   return encrypt(await gzip(json), key);
 }
 

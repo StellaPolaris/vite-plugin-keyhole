@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // keyhole keygen            print a fresh random key
 // keyhole link <url>        print <url>#key=<KEYHOLE_KEY>
+import { parseArgs } from 'node:util';
 import { generateKey, parseKey } from './core.ts';
 
 const USAGE = `Usage:
@@ -21,15 +22,29 @@ async function main(args: string[]): Promise<number> {
     console.log(generateKey());
     return 0;
   }
-  if (command === 'link' && rest[0]) {
-    const modeAt = rest.indexOf('--mode');
-    const mode = modeAt >= 0 ? rest[modeAt + 1] : 'production';
-    const keyText = (await readKey(mode))?.trim();
+  if (command === 'link') {
+    let mode: string | undefined;
+    let positionals: string[];
+    try {
+      ({ values: { mode }, positionals } = parseArgs({ args: rest, options: { mode: { type: 'string' } }, allowPositionals: true }));
+    } catch (error) {
+      console.error(`keyhole: ${(error as Error).message}\n\n${USAGE}`);
+      return 1;
+    }
+    if (positionals.length !== 1) {
+      console.error(USAGE);
+      return 1;
+    }
+    const url = URL.parse(positionals[0]);
+    if (!url || (url.protocol !== 'https:' && url.protocol !== 'http:')) {
+      console.error(`keyhole: "${positionals[0]}" is not a full URL. Include https://, for example https://me.github.io/site/`);
+      return 1;
+    }
+    const keyText = (await readKey(mode ?? 'production'))?.trim();
     if (!keyText || !parseKey(keyText)) {
       console.error('keyhole: KEYHOLE_KEY is missing or malformed. Create one with `keyhole keygen`.');
       return 1;
     }
-    const url = new URL(rest[0]);
     url.hash = `key=${keyText}`;
     console.log(url.href);
     return 0;

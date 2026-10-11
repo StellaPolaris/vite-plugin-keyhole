@@ -63,6 +63,8 @@ describe('fixture build', () => {
     expect(payload.html).not.toMatch(/<script|<link/);
     expect(payload.js).toContain(CANARY);
     expect(payload.js).toContain('lazy-loaded');
+    // Sealed only after Vite finished rewriting the chunk; a leftover marker throws when the app starts.
+    expect(payload.js).not.toContain('__VITE_PRELOAD__');
     expect(payload.js).toContain('data:image/svg+xml');
   });
 
@@ -87,16 +89,51 @@ describe('fixture build', () => {
   it('fails when public/ files would be copied unencrypted', async () => {
     mkdirSync(publicDir, { recursive: true });
     writeFileSync(path.join(publicDir, 'robots.txt'), 'User-agent: *');
-    await expect(buildFixture({ key: generateKey() })).rejects.toThrow(/unencrypted files:\s+robots\.txt/);
+    rmSync(outDir, { recursive: true, force: true });
+    await expect(buildFixture({ key: generateKey() })).rejects.toThrow(/copied unencrypted:\s+robots\.txt/);
+    // Refused before Vite wrote anything.
+    expect(() => readdirSync(outDir)).toThrow();
+    // Allowed when public/ isn't copied.
+    await buildFixture({ key: generateKey() }, { build: { copyPublicDir: false } });
+    expect(listFiles(outDir)).toHaveLength(3);
+  });
+
+  it('refuses an output destination other than build.outDir', async () => {
+    const elsewhere = path.join(root, 'elsewhere');
+    try {
+      await expect(
+        buildFixture({ key: generateKey() }, { build: { rolldownOptions: { output: { dir: elsewhere } } } }),
+      ).rejects.toThrow(/set build\.outDir/);
+      expect(() => readdirSync(elsewhere)).toThrow();
+    } finally {
+      rmSync(elsewhere, { recursive: true, force: true });
+    }
+  });
+
+  it('ignores .git in the output folder, as a folder or a worktree file', async () => {
+    const git = path.join(outDir, '.git');
+    try {
+      await buildFixture({ key: generateKey() });
+      writeFileSync(git, 'gitdir: ../.git/worktrees/dist');
+      await buildFixture({ key: generateKey() });
+      rmSync(git);
+      mkdirSync(git);
+      writeFileSync(path.join(git, 'HEAD'), 'ref: refs/heads/gh-pages');
+      await buildFixture({ key: generateKey() });
+    } finally {
+      rmSync(git, { recursive: true, force: true });
+    }
   });
 
   it('uses a custom landing page', async () => {
     const landing = path.join(outDir, '..', 'custom-landing.html');
-    writeFileSync(landing, '<html><body><p>custom landing</p></body></html>');
+    // 'İ' grows when lowercased, which used to shift the insert position.
+    writeFileSync(landing, '<html><body><p>İİİ custom landing</p></BODY></html>');
     try {
       await buildFixture({ key: generateKey(), landing: 'custom-landing.html' });
       const index = readFileSync(path.join(outDir, 'index.html'), 'utf8');
       expect(index).toMatch(/custom landing<\/p><script type="application\/json" id="keyhole-config">/);
+      expect(index).toMatch(/<\/script>\n<\/BODY><\/html>$/);
     } finally {
       rmSync(landing);
     }
