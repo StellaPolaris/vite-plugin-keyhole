@@ -1,0 +1,2 @@
+h1 { background: url('./logo.svg') no-repeat; }
+h1::after { content: 'css-canary-91b2'; }
